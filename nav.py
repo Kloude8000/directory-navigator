@@ -1,254 +1,421 @@
-from tkinter import *
-from ttkbootstrap import*
+from pathlib import Path
 import os
 import shutil
-from collections import Counter
-master = Window(themename='cyborg')
-master.title('NAVVI')
-master.geometry('400x450')
+import threading
+import queue
+import fnmatch
+import tkinter as tk
+from tkinter import messagebox, filedialog
+from tkinter import ttk
+from ttkbootstrap import Style
 
-# under the hood
-def dir_trav(event):
-    global shownFiles
-    global display_no
-    global shown_F_and_C
-    # get content of search entry widget
-    search_con = search_entry.get()
-    # delete content of search entry widget
-    search_entry.delete(0, END)
-    # import os module to work with files
-    # check if directory exists
-    check_exist = os.path.exists(search_con)
-    if check_exist is True:
-        var_show = os.listdir(search_con)
-        # create label to display files
-        shownFiles = Label(tab_dir, text = '\n'.join(var_show), font = 'century 10')
-        shownFiles.grid(row = 4, column = 0)
-        # show number of files
-        file_num = len(os.listdir(search_con))
-        display_no = Label(tab_dir, text= file_num, font = 'century 10', style = 'danger')
-        display_no.grid(row = 1, column = 2, padx = 5)
-        # list to store extensions
-        ext_list = []
-        # show file type and count
-        for filename in os.listdir(search_con):
-            root, ext = os.path.splitext(filename)
-            ext_list.append(ext)
-        # imported Counter from collections module
-        list_ext = Counter(ext_list)
-        show_count = ''
-        for ext, count in list_ext.items():
-            show_count = show_count + f'{ext} : {count}\n'
-        # display ext and count on interface
-        shown_F_and_C = Label(tab_dir, text= show_count, font = 'century 10', style = 'danger')
-        shown_F_and_C.place(x = 240, y = 100)
-    # if directory does not exist
-    else:
-        shownFiles = Label(tab_dir, text = 'Directory not found', style = 'danger', 
-        font = 'century 12')
-        shownFiles.grid(row = 4, column = 0)
-    # counting number of lines
-    line_getting = shownFiles.cget('text')
-    line_converting = str(line_getting).count('\n')
-    line_incrementer = line_converting + 1
-    if line_incrementer >= 16:
-        nb_dir.config(height=(line_incrementer+9)*15)
 
-# function to clear first tab
-def clearContent():
-    if shownFiles.cget('text') != '':
-        shownFiles.config(text = '')
-    shownFiles.grid(row = 4, column = 0)
-    if display_no.cget('text') != '':
-        display_no.config(text='')
-    if shown_F_and_C.cget('text') != '':
-        shown_F_and_C.config(text='')
-    nb_dir.config(height=350)
-    master.geometry('400x450')
+class DirectoryNavigator:
+    def __init__(self):
+        # Setup style & root
+        self.style = Style(theme='cyborg')
+        self.root = self.style.master
+        self.root.title("NAVVI - Directory Navigator")
+        self.root.geometry("780x540")
+        self.root.minsize(700, 420)
 
-# under the hood tab 2
-def path_exist():
-    if not os.path.exists(dest_dir_entry.get()):
-        os.mkdir(dest_dir_entry.get())
-    if os.path.exists(src_dir_entry.get()):
-    # iterating through contents of source directory
-        for filename in os.listdir(src_dir_entry.get()):
-          file_path = os.path.join(src_dir_entry.get(), filename)
-          if file_path.endswith(ext_type.get()):
-            shutil.copy(file_path, dest_dir_entry.get()) 
+        # Worker queue for thread -> GUI messages
+        self._queue = queue.Queue()
 
-def Deletion():
-    de_li = deletion_entry.get()
-    if os.path.isdir(de_li):
-        shutil.rmtree(de_li)
-        deletion_entry.delete(0, END)
-    elif os.path.isfile(de_li):
-        os.remove(de_li)
-        deletion_entry.delete(0, END)
+        self._build_ui()
+        self._periodic_check_queue()
 
-# create function to show absolute path of file
-def Display():
-        #par_dir = os.pardir='C:\\'
-        for root, dirs, files in os.walk('C:\\'):
-            if show_entry.get() in files:
-                sas = os.path.join(root, show_entry.get())
-                L = Label(tab_move, text=sas, style='light', font='century 10')
-                L.place(x=0, y=290)
-                #show_entry.delete(0,END)
-        #
-        wide_count = len(L.cget('text'))
-        if wide_count >= 55:
-            nb_dir.config(width=wide_count*8)
-        #if len(L.cget('text')) > 50:
-            #nb_dir.config(width=500)
-            #master.geometry('500x450')
-        #if abs_show == '':
-            #L.config(text='No filename entered') 
-        
+    def _build_ui(self):
+        nb = ttk.Notebook(self.root)
+        nb.pack(fill="both", expand=True, padx=10, pady=10)
 
-# create another function to clear content
-def clearContent2():
-    global L
-    if L.cget('text') != '':
-        L.config(text = '')
-    nb_dir.config(width=400)
-    master.geometry('400x450')
-    
+        # --- Tab 1: Directories (list & stats) ---
+        tab_dir = ttk.Frame(nb)
+        nb.add(tab_dir, text="Directories")
 
-# create notebook tabs
-nb_dir = Notebook(master, width = 400, height = 350)
-nb_dir.grid(row = 0, column = 0)
+        top_frame = ttk.Frame(tab_dir)
+        top_frame.pack(fill="x", padx=10, pady=(6, 4))
 
-# create first tab
-tab_dir = Frame(nb_dir, relief=FLAT)
+        self.dir_entry = ttk.Entry(top_frame, width=60)
+        self.dir_entry.pack(side="left", padx=(0, 6))
 
-# create search directory label
-search_label = Label(tab_dir, text='Search for directory', style= 'danger', font='century 10')
-search_label.grid(row = 0, column = 0, padx = 5, pady = 5)
+        browse_btn = ttk.Button(top_frame, text="Browse...", command=self._browse_directory)
+        browse_btn.pack(side="left", padx=(0, 6))
 
-# create number of files label
-no_of_files = Label(tab_dir, text = 'Number of files:', style = 'light', font = 'century 10')
-no_of_files.grid(row= 1, column = 1, padx = 15)
+        list_btn = ttk.Button(top_frame, text="List", command=self._list_directory)
+        list_btn.pack(side="left")
 
-# create shown files label
-show_files = Label(tab_dir, text = 'Files in the directory', style = 'light', font = 'century 10')
-show_files.grid(row = 2, column = 0, pady = 10, padx = 5)
+        # Middle: results + extension counts
+        mid_frame = ttk.Frame(tab_dir)
+        mid_frame.pack(fill="both", expand=True, padx=10, pady=6)
 
-# create file type label 
-file_type = Label(tab_dir, text = 'File type & count', style = 'light', font = 'century 10')
-file_type.grid(row= 2, column = 1)
+        # Scrollable text for file list
+        files_frame = ttk.LabelFrame(mid_frame, text="Files")
+        files_frame.pack(side="left", fill="both", expand=True, padx=(0, 6))
 
-# function to clear entry
-def clear(event):
-    search_entry.delete(0, END)
+        self.files_text = tk.Text(files_frame, wrap="none", height=22)
+        self.files_text.pack(side="left", fill="both", expand=True)
 
-# create search entry 
-search_entry = Entry(tab_dir, width = 30, style = 'success')
-search_entry.grid(row = 1, column = 0, padx = 5)
-search_entry.insert(0, 'Enter directory path')
-search_entry.bind('<FocusIn>', clear)
-search_entry.bind('<Return>', dir_trav)
+        vsb = ttk.Scrollbar(files_frame, orient="vertical", command=self.files_text.yview)
+        vsb.pack(side="right", fill="y")
+        self.files_text['yscrollcommand'] = vsb.set
 
-# create second tab
-tab_move = Frame(nb_dir, relief = FLAT)
+        # Extension counts and summary
+        stats_frame = ttk.LabelFrame(mid_frame, text="Summary", width=260)
+        stats_frame.pack(side="left", fill="y")
 
-# create entry for extension type
-ext_type = Entry(tab_move, width = 10, style = 'success')
-ext_type.place(x = 310, y = 10)
+        self.count_label = ttk.Label(stats_frame, text="Number of items: 0", anchor="w")
+        self.count_label.pack(fill="x", padx=6, pady=(6, 2))
 
-# create label for extension type
-ext_type_label = Label(tab_move, text = 'Extension type', style = 'light', font = 'century 10')
-ext_type_label.place(x = 210, y = 10)
+        self.ext_counts_box = tk.Listbox(stats_frame, height=14)
+        self.ext_counts_box.pack(fill="both", expand=True, padx=6, pady=4)
 
-# create function to clear entry for source
-def clear1(event):
-    if src_dir_entry.get() == 'Enter source directory':
-        src_dir_entry.delete(0, END)
-# create function to restore entry for destination
-def restore1(event):
-    if src_dir_entry.get() == '':
-        src_dir_entry.insert(0, 'Enter source directory')
+        clear_btn = ttk.Button(stats_frame, text="Clear", command=self._clear_dir_view)
+        clear_btn.pack(padx=6, pady=6)
 
-# create function to clear entry for source 
-def clear2(event):
-    if dest_dir_entry.get() == 'Enter destination directory':
-        dest_dir_entry.delete(0, END)
-# create function to restore entry for destination
-def restore2(event):
-    if dest_dir_entry.get() == '':
-        dest_dir_entry.insert(0, 'Enter destination directory') 
+        # --- Tab 2: Move/Copy/Delete/Find ---
+        tab_ops = ttk.Frame(nb)
+        nb.add(tab_ops, text="Operations")
 
-# create entry for source directory
-src_dir_entry = Entry(tab_move, width = 25, style = 'success')
-src_dir_entry.place(x = 10, y = 70)
-src_dir_entry.insert(0, 'Enter source directory')
-src_dir_entry.bind('<FocusIn>', clear1)
-src_dir_entry.bind('<FocusOut>', restore1)
+        ops_top = ttk.Frame(tab_ops)
+        ops_top.pack(fill="x", padx=10, pady=6)
 
-# create entry for destination directory
-dest_dir_entry = Entry(tab_move, width = 25, style = 'success')
-dest_dir_entry.place(x = 220, y = 70)
-dest_dir_entry.insert(0, 'Enter destination directory')
-dest_dir_entry.bind('<FocusIn>', clear2)
-dest_dir_entry.bind('<FocusOut>', restore2)
+        # Source
+        ttk.Label(ops_top, text="Source:").grid(row=0, column=0, sticky="w")
+        self.src_entry = ttk.Entry(ops_top, width=60)
+        self.src_entry.grid(row=0, column=1, padx=(6, 6))
+        ttk.Button(ops_top, text="Browse", command=lambda: self._choose_dir(self.src_entry)).grid(row=0, column=2)
 
-# create button to handle file movement 
-button_move = Button(tab_move, text = 'move', style = 'warning outline', cursor='hand2', command= path_exist)
-button_move.place(x = 10, y = 130)
+        # Destination
+        ttk.Label(ops_top, text="Destination:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.dst_entry = ttk.Entry(ops_top, width=60)
+        self.dst_entry.grid(row=1, column=1, padx=(6, 6), pady=(6, 0))
+        ttk.Button(ops_top, text="Browse", command=lambda: self._choose_dir(self.dst_entry)).grid(row=1, column=2, pady=(6, 0))
 
-# create partition 
-divider = Label(tab_move, text = '_'*100, style = 'light')
-divider.place(x = 0, y = 170)
+        # Patterns, mode and options
+        ttk.Label(ops_top, text="Patterns:").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.patterns_entry = ttk.Entry(ops_top, width=40)
+        self.patterns_entry.grid(row=2, column=1, sticky="w", padx=(6, 0), pady=(6, 0))
+        ttk.Label(ops_top, text="(comma-separated, e.g. *.py, *.md). Leave empty to match all").grid(row=2, column=1, sticky="w", padx=(360, 0))
 
-# create label for deletion
-deletion_label = Label(tab_move, text = 'Delete file or directory', style = 'light',
-                       font = 'century 10')
-deletion_label.place(x = 5, y = 180)
+        self.mode_var = tk.StringVar(value="copy")
+        ttk.Radiobutton(ops_top, text="Copy", variable=self.mode_var, value="copy").grid(row=3, column=1, sticky="w")
+        ttk.Radiobutton(ops_top, text="Move", variable=self.mode_var, value="move").grid(row=3, column=1, sticky="w", padx=(80, 0))
 
-# create function to clear deletion entry
-def clear3(event):
-    if deletion_entry.get() == 'Enter file or directory path':
-        deletion_entry.delete(0, END)
+        # Preserve structure and case-insensitive options
+        self.preserve_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ops_top, text="Preserve directory structure", variable=self.preserve_var).grid(row=4, column=1, sticky="w", pady=(6, 0))
 
-# create entry for deletion
-deletion_entry = Entry(tab_move, width = 30, style = 'success')
-deletion_entry.place(x = 5, y = 210)
-deletion_entry.insert(0, 'Enter file or directory path')
-deletion_entry.bind('<FocusIn>', clear3)
+        self.case_insensitive_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ops_top, text="Case-insensitive match", variable=self.case_insensitive_var).grid(row=5, column=1, sticky="w")
 
-# create label for extension type not to delete
-no_del_ext_type = Label(tab_move, text = 'Show path to file', style = 'light',
-                        font = 'century 10')
-no_del_ext_type.place(x = 270, y = 180)
+        self.transfer_btn = ttk.Button(ops_top, text="Start", command=self._start_transfer)
+        self.transfer_btn.grid(row=6, column=1, pady=(8, 0), sticky="w")
 
-# create label 
-ent_lab = Label(tab_move, text = 'enter filename', style = 'light', font='century 10')
-ent_lab.place(x = 275, y = 210)
-# create entry for extension type not to delete
-show_entry = Entry(tab_move, width = 15, style = 'success')
-show_entry.place(x = 265, y = 230)
+        # Progress and status
+        prog_frame = ttk.Frame(tab_ops)
+        prog_frame.pack(fill="x", padx=10, pady=6)
+        self.progress = ttk.Progressbar(prog_frame, orient="horizontal", mode="determinate")
+        self.progress.pack(fill="x", padx=4)
+        self.status_label = ttk.Label(prog_frame, text="Idle")
+        self.status_label.pack(anchor="w", padx=4, pady=(4, 0))
 
-# create clear button
-clear_button = Button(tab_dir, text = 'clear', style = 'warning outline', cursor = 'hand2',
-                      command = clearContent)
-clear_button.place(x = 340, y = 310)
+        # Delete section
+        del_frame = ttk.LabelFrame(tab_ops, text="Delete (file or directory)")
+        del_frame.pack(fill="x", padx=10, pady=6)
 
-# create deletion button
-deletion_button = Button(tab_move, text = 'delete', style = 'warning outline', cursor='hand2',
-                         command = Deletion)
-deletion_button.place(x = 10, y = 267)
+        self.del_entry = ttk.Entry(del_frame, width=70)
+        self.del_entry.pack(side="left", padx=(6, 4), pady=6)
+        ttk.Button(del_frame, text="Browse", command=lambda: self._choose_path(self.del_entry)).pack(side="left", padx=(0, 4))
+        ttk.Button(del_frame, text="Delete", command=self._confirm_delete).pack(side="left", padx=(0, 4))
 
-# create another clear button
-clear_button2 = Button(tab_move, text = 'clear', style='warning outline', cursor = 'hand2',
-                       command = clearContent2)
-clear_button2.place(x = 156, y = 267)
+        # Find file section
+        find_frame = ttk.LabelFrame(tab_ops, text="Find file by name")
+        find_frame.pack(fill="both", expand=True, padx=10, pady=6)
 
-# create button
-but_dis = Button(tab_move, text = 'show', style='warning outline', cursor = 'hand2', command = Display)
-but_dis.place(x = 315, y = 265)
+        top_find = ttk.Frame(find_frame)
+        top_find.pack(fill="x", padx=6, pady=(6, 4))
+        ttk.Label(top_find, text="Filename:").pack(side="left")
+        self.find_entry = ttk.Entry(top_find, width=36)
+        self.find_entry.pack(side="left", padx=(6, 6))
+        ttk.Button(top_find, text="Search root...", command=self._choose_root_for_find).pack(side="left")
+        ttk.Button(top_find, text="Find", command=self._start_find).pack(side="left", padx=(6, 0))
 
-# add tab to notebook
-nb_dir.add(tab_dir, text = 'DIRECTORIES')
-nb_dir.add(tab_move, text = 'MOVE')
+        # Results
+        self.find_results = tk.Listbox(find_frame)
+        self.find_results.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
-master.mainloop()
+    # ---------- Directory tab helpers ----------
+    def _browse_directory(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.dir_entry.delete(0, tk.END)
+            self.dir_entry.insert(0, path)
+            self._list_directory()
+
+    def _list_directory(self):
+        path_text = self.dir_entry.get().strip()
+        if not path_text:
+            messagebox.showinfo("No path", "Please enter or choose a directory to list.")
+            return
+        p = Path(path_text)
+        if not p.exists() or not p.is_dir():
+            messagebox.showerror("Not found", f"Directory not found: {p}")
+            return
+
+        try:
+            entries = list(p.iterdir())
+        except Exception as exc:
+            messagebox.showerror("Error", f"Failed to list directory: {exc}")
+            return
+
+        # Clear previous view
+        self.files_text.delete("1.0", tk.END)
+        self.ext_counts_box.delete(0, tk.END)
+
+        files = [e.name for e in entries if e.is_file()]
+        dirs = [e.name + "/" for e in entries if e.is_dir()]
+
+        # Show directory contents
+        for name in sorted(dirs) + sorted(files):
+            self.files_text.insert(tk.END, name + "\n")
+
+        # Count and extension stats
+        self.count_label.config(text=f"Number of items: {len(entries)}")
+        ext_counter = {}
+        for fname in files:
+            _, ext = os.path.splitext(fname)
+            ext = ext.lower() or "<no ext>"
+            ext_counter[ext] = ext_counter.get(ext, 0) + 1
+        for ext, cnt in sorted(ext_counter.items(), key=lambda t: (-t[1], t[0])):
+            self.ext_counts_box.insert(tk.END, f"{ext} : {cnt}")
+
+    def _clear_dir_view(self):
+        self.dir_entry.delete(0, tk.END)
+        self.files_text.delete("1.0", tk.END)
+        self.ext_counts_box.delete(0, tk.END)
+        self.count_label.config(text="Number of items: 0")
+
+    # ---------- Operations tab helpers ----------
+    def _choose_dir(self, entry_widget):
+        path = filedialog.askdirectory()
+        if path:
+            entry_widget.delete(0, tk.END)
+            entry_widget.insert(0, path)
+
+    def _choose_path(self, entry_widget):
+        # allow file or directory
+        path = filedialog.askopenfilename()
+        if not path:
+            # fallback to directory
+            path = filedialog.askdirectory()
+        if path:
+            entry_widget.delete(0, tk.END)
+            entry_widget.insert(0, path)
+
+    def _confirm_delete(self):
+        target = self.del_entry.get().strip()
+        if not target:
+            messagebox.showinfo("No path", "Enter or choose a file or directory to delete.")
+            return
+        p = Path(target)
+        if not p.exists():
+            messagebox.showerror("Not found", f"Target does not exist: {p}")
+            return
+
+        if p.is_dir():
+            desc = f"Directory and all contents: {p}"
+        else:
+            desc = f"File: {p}"
+
+        if messagebox.askyesno("Confirm delete", f"Are you sure you want to delete?\n{desc}"): 
+            # run in background
+            threading.Thread(target=self._delete_worker, args=(p,), daemon=True).start()
+            self.status_label.config(text="Deleting...")
+
+    def _delete_worker(self, path: Path):
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            self._queue.put(("info", f"Deleted: {path}"))
+        except Exception as exc:
+            self._queue.put(("error", f"Failed to delete {path}: {exc}"))
+        finally:
+            self._queue.put(("done", None))
+
+    def _start_transfer(self):
+        src = self.src_entry.get().strip()
+        dst = self.dst_entry.get().strip()
+        patterns_raw = self.patterns_entry.get().strip()
+        mode = self.mode_var.get()
+        preserve = self.preserve_var.get()
+        case_insensitive = self.case_insensitive_var.get()
+
+        if not src or not dst:
+            messagebox.showinfo("Missing paths", "Please set both source and destination directories.")
+            return
+        src_p = Path(src)
+        dst_p = Path(dst)
+        if not src_p.exists() or not src_p.is_dir():
+            messagebox.showerror("Invalid source", f"Source directory not found: {src_p}")
+            return
+        try:
+            dst_p.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror("Destination error", f"Cannot create destination: {exc}")
+            return
+
+        # parse patterns
+        patterns = [p.strip() for p in patterns_raw.split(",") if p.strip()]
+
+        # disable UI controls while running
+        self.transfer_btn.config(state="disabled")
+        self.progress.config(mode="indeterminate")
+        self.progress.start(10)
+        self.status_label.config(text=f"{mode.title()} in progress...")
+
+        threading.Thread(
+            target=self._transfer_worker,
+            args=(src_p, dst_p, patterns, mode, preserve, case_insensitive),
+            daemon=True,
+        ).start()
+
+    def _file_matches(self, filename: str, patterns: list, case_insensitive: bool) -> bool:
+        if not patterns:
+            return True
+        if case_insensitive:
+            name = filename.lower()
+            for pat in patterns:
+                if fnmatch.fnmatch(name, pat.lower()):
+                    return True
+        else:
+            for pat in patterns:
+                if fnmatch.fnmatch(filename, pat):
+                    return True
+        return False
+
+    def _transfer_worker(self, src: Path, dst: Path, patterns: list, mode: str, preserve: bool, case_insensitive: bool):
+        try:
+            matches = []
+            for root, _, files in os.walk(src):
+                for f in files:
+                    if self._file_matches(f, patterns, case_insensitive):
+                        matches.append(Path(root) / f)
+
+            total = len(matches)
+            if total == 0:
+                self._queue.put(("info", "No matching files found."))
+                return
+
+            self._queue.put(("progress_start", total))
+
+            processed = 0
+            for p in matches:
+                try:
+                    if preserve:
+                        rel = p.relative_to(src)
+                        dest_path = dst / rel
+                        dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    else:
+                        dest_path = dst / p.name
+                    if mode == "copy":
+                        shutil.copy2(p, dest_path)
+                    else:
+                        # move preserves structure by moving the file
+                        if preserve:
+                            dest_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.move(str(p), str(dest_path))
+                        else:
+                            shutil.move(str(p), str(dest_path))
+                    processed += 1
+                    self._queue.put(("progress_update", processed))
+                except Exception as exc:
+                    self._queue.put(("error", f"Failed to {mode} {p}: {exc}"))
+
+            self._queue.put(("info", f"{mode.title()} complete: {processed}/{total} files"))
+        finally:
+            self._queue.put(("done_transfer", None))
+
+    # ---------- Find feature ----------
+    def _choose_root_for_find(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.find_root = Path(path)
+            messagebox.showinfo("Search root set", f"Search root set to: {path}")
+
+    def _start_find(self):
+        fname = self.find_entry.get().strip()
+        if not fname:
+            messagebox.showinfo("No filename", "Please enter a filename to find.")
+            return
+        root = getattr(self, "find_root", None)
+        if not root:
+            messagebox.showinfo("No root", "Choose a search root with 'Search root...' first.")
+            return
+        # clear results
+        self.find_results.delete(0, tk.END)
+        self.status_label.config(text="Finding...")
+        threading.Thread(target=self._find_worker, args=(root, fname), daemon=True).start()
+
+    def _find_worker(self, root: Path, fname: str):
+        found = 0
+        try:
+            for dirpath, _, files in os.walk(root):
+                for f in files:
+                    if f == fname:
+                        found_path = Path(dirpath) / f
+                        self._queue.put(("find_result", str(found_path)))
+                        found += 1
+            if found == 0:
+                self._queue.put(("info", "No files found."))
+            else:
+                self._queue.put(("info", f"Found {found} result(s)."))
+        except Exception as exc:
+            self._queue.put(("error", f"Error searching: {exc}"))
+        finally:
+            self._queue.put(("done", None))
+
+    # ---------- Queue processing ----------
+    def _periodic_check_queue(self):
+        try:
+            while True:
+                item = self._queue.get_nowait()
+                kind, data = item
+                if kind == "info":
+                    self.status_label.config(text=data)
+                    messagebox.showinfo("Info", data)
+                elif kind == "error":
+                    self.status_label.config(text="Error")
+                    messagebox.showerror("Error", data)
+                elif kind == "progress_start":
+                    total = data or 0
+                    self.progress.stop()
+                    self.progress.config(mode="determinate", maximum=total, value=0)
+                elif kind == "progress_update":
+                    self.progress.config(value=data)
+                    self.status_label.config(text=f"Progress: {int(self.progress['value'])}/{int(self.progress['maximum'])}")
+                elif kind == "done_transfer":
+                    self.transfer_btn.config(state="normal")
+                    self.progress.config(mode="determinate", value=self.progress['maximum'])
+                    self.status_label.config(text="Transfer finished")
+                elif kind == "done":
+                    self.progress.config(mode="determinate", value=0)
+                elif kind == "find_result":
+                    self.find_results.insert(tk.END, data)
+                else:
+                    self.status_label.config(text=str(data or ""))
+        except queue.Empty:
+            pass
+        # call again after 200ms
+        self.root.after(200, self._periodic_check_queue)
+
+
+def main():
+    app = DirectoryNavigator()
+    app.root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
